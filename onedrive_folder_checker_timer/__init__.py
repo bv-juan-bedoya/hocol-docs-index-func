@@ -322,20 +322,44 @@ def clean_json_response(response_text):
 
 def extract_date_from_text(text):
     """
-    Extrae fecha en formato MM/DD/YYYY del texto usando regex
+    Extrae fecha del texto o nombre de archivo en varios formatos:
+    1. Del nombre de archivo: RepDia_YYYYMMDD(email).pdf -> MM/DD/YYYY
+    2. Del texto: MM/DD/YYYY
     """
     try:
-        # Patrón para fecha MM/DD/YYYY
-        date_pattern = r'\b(\d{1,2})/(\d{1,2})/(\d{4})\b'
-        match = re.search(date_pattern, text)
+        # First try to extract date from filename pattern RepDia_YYYYMMDD
+        filename_pattern = r'RepDia_(\d{8})'
+        filename_match = re.search(filename_pattern, text)
         
-        if match:
-            month, day, year = match.groups()
+        if filename_match:
+            date_str = filename_match.group(1)  # Extract YYYYMMDD
+            year = date_str[:4]
+            month = date_str[4:6]
+            day = date_str[6:8]
+            
+            # Convert to MM/DD/YYYY format
+            formatted_date = f"{month}/{day}/{year}"
+            
+            # Validate the date
+            date_obj = datetime.datetime.strptime(formatted_date, "%m/%d/%Y")
+            logging.info(f"Extracted date from filename: {formatted_date}")
+            return date_obj.isoformat() + "Z"
+        
+        # If no filename pattern found, try traditional MM/DD/YYYY pattern in text
+        date_pattern = r'\b(\d{1,2})/(\d{1,2})/(\d{4})\b'
+        text_match = re.search(date_pattern, text)
+        
+        if text_match:
+            month, day, year = text_match.groups()
             date_str = f"{month.zfill(2)}/{day.zfill(2)}/{year}"
             # Convertir a DateTimeOffset
             date_obj = datetime.datetime.strptime(date_str, "%m/%d/%Y")
+            logging.info(f"Extracted date from text: {date_str}")
             return date_obj.isoformat() + "Z"
+        
+        logging.info("No date found in filename or text")
         return None
+        
     except Exception as e:
         logging.error(f"Error al extraer fecha: {e}")
         return None
@@ -620,12 +644,15 @@ def main(mytimer: func.TimerRequest) -> None:
                             embedding = []
                         
                         # 4.8. Crear JSON object
-                        # Extraer fecha del contenido
-                        release_date = extract_date_from_text(doc_intel_content + " " + vision_data.get("markdown_content", ""))
+                        # Extraer fecha del contenido o nombre de archivo
+                        # Include filename, document content, and vision data for date extraction
+                        text_for_date_extraction = f"{file_path} {doc_intel_content} {vision_data.get('markdown_content', '')}"
+                        release_date = extract_date_from_text(text_for_date_extraction)
+                        logging.info(f"Extracted release date: {release_date}")
                         
                         # Formato correcto para Azure Search DateTimeOffset (sin microsegundos)
                         now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-                        document_url = f"https://{HOSTNAME}/sites/{SITE}/_layouts/15/Doc.aspx?sourcedoc={{doc_id}}&file={file_path}"
+                        document_url = f"https://{HOSTNAME}/sites/{SITE}/Documentos%20compartidos/{FOLDER_PATH}/{file_path}"
                         
                         search_document = {
                             "id": str(uuid.uuid4()),
@@ -654,6 +681,14 @@ def main(mytimer: func.TimerRequest) -> None:
                 processed_files.append(file_path)
                 logging.info(f"*** COMPLETED PROCESSING FILE: {file_path} ***")
                 
+                # Update last_files.json immediately after processing each file
+                try:
+                    updated_last_files = last_files + processed_files
+                    write_blob_json("last_files.json", updated_last_files)
+                    logging.info(f"Updated last_files.json with file: {file_path}")
+                except Exception as e:
+                    logging.error(f"Error updating last_files.json for file {file_path}: {e}")
+                
                 # Limpiar archivos temporales
                 try:
                     os.unlink(temp_pdf)
@@ -667,12 +702,14 @@ def main(mytimer: func.TimerRequest) -> None:
                 logging.error(f"Error processing file {file_path}: {e}")
                 continue
         
-        # 5. Actualizar last_files.json
+        # 5. Final summary (last_files.json already updated incrementally)
         if processed_files:
-            logging.info("=== STEP 5: UPDATING LAST_FILES.JSON ===")
-            updated_last_files = last_files + processed_files
-            write_blob_json("last_files.json", updated_last_files)
-            logging.info(f"Updated last_files.json with {len(processed_files)} new files")
+            logging.info("=== STEP 5: PROCESSING SUMMARY ===")
+            logging.info(f"Successfully processed and tracked {len(processed_files)} new files")
+            logging.info(f"Files processed: {processed_files}")
+        else:
+            logging.info("=== STEP 5: NO NEW FILES TO PROCESS ===")
+            logging.info("No new files were found or processed in this execution")
         
         logging.info('*' * 80)
         logging.info(f'*** DOCUMENT PROCESSOR TIMER COMPLETED ***')
